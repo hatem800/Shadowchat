@@ -73,6 +73,7 @@ const String darkModeKey = 'dark_mode_enabled';
 bool firebaseReady = false;
 String firebaseFailureMessage = '';
 String? currentPublicUserId;
+final ValueNotifier<String?> publicUserIdNotifier = ValueNotifier<String?>(null);
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -904,6 +905,7 @@ Future<void> ensureUserProfile() async {
       profile.data()?['publicId'] as String? ??
       'SC-${user.uid.substring(0, 6).toUpperCase()}';
   currentPublicUserId = publicId;
+  publicUserIdNotifier.value = publicId;
   await profileRef.set({
     'publicId': publicId,
     'displayName': profile.data()?['displayName'] ?? 'Shadow User',
@@ -1082,6 +1084,9 @@ class _AuthGateState extends State<AuthGate> {
 
     try {
       await FirebaseAuth.instance.signInAnonymously();
+        await ensureUserProfile();
+        await loadRoomOwnerKey();
+        await loadSecretRoomCode();
       await setupPushNotifications();
       if (mounted) setState(() => _authError = null);
     } catch (error) {
@@ -2337,13 +2342,18 @@ class _ContactsScreenState extends State<ContactsScreen> {
               child: Column(
                 children: [
                   if (user != null)
-                    SelectableText(
-                      'معرّفك السهل: ${currentPublicUserId ?? 'جارٍ التحميل...'}',
-                      style: const TextStyle(
-                        color: Color(0xFF38E8A5),
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold,
+                    ValueListenableBuilder<String?>(
+                      valueListenable: publicUserIdNotifier,
+                      builder: (context, publicId, child) {
+                        return SelectableText(
+                          'معرّفك السهل: ${publicId ?? 'جارٍ التحميل...'}',
+                          style: const TextStyle(
+                            color: Color(0xFF38E8A5),
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                          ),
                       ),
+                      },
                     ),
                   const SizedBox(height: 8),
                   SizedBox(
@@ -2658,8 +2668,11 @@ class _SecretRoomScreenState extends State<SecretRoomScreen>
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                 ),
                 onPressed: () async {
-                  if (await hashPassword(_codeController.text.trim()) ==
-                      secretRoomCodeHashNotifier.value) {
+                    final enteredCode = _codeController.text.trim();
+                    final isValidCode = enteredCode == secretRoomCode ||
+                      await hashPassword(enteredCode) ==
+                        secretRoomCodeHashNotifier.value;
+                    if (isValidCode) {
                     final user = FirebaseAuth.instance.currentUser;
                     if (firebaseReady && user != null) {
                       await FirebaseFirestore.instance
@@ -3151,6 +3164,7 @@ class _SecretChatScreenState extends State<SecretChatScreen>
       _secretMessages[0]['text'] = 'أهلاً بك في غرفة Shadow Ops';
       _secretMessages[0]['roomNote'] = 'قناة خاصة وآمنة داخل الغرفة السرية';
     }
+    _loadLocalSecretVoiceMessages();
     _listenToSecretMessages();
     _loadSecretMembership();
     _loadGroupPassword();
@@ -3391,20 +3405,34 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                 return null;
               }
               final timestamp = data['createdAt'];
+              final mediaUrl = data['mediaUrl'] as String?;
+              final localMediaPath = mediaUrl != null &&
+                      mediaUrl.startsWith('local://')
+                  ? mediaUrl.substring('local://'.length)
+                  : null;
               return {
                 'docId': doc.id,
                 'sender': data['sender'] ?? 'مستخدم',
                 'text': data['text'] ?? '',
                 'isMe': data['uid'] == FirebaseAuth.instance.currentUser?.uid,
+                'mediaType': data['mediaType'] as String?,
+                'mediaFile': localMediaPath == null
+                    ? null
+                    : XFile(localMediaPath),
+                'mediaUrl': localMediaPath == null ? mediaUrl : null,
                 'time': timestamp is Timestamp
                     ? _formatTimestamp(timestamp)
                     : _formatMessageTime(),
               };
             }).whereType<Map<String, dynamic>>().toList();
+            final localMessages = _secretMessages
+                .where((message) => message['docId'] == null)
+                .toList();
             setState(() {
               _secretMessages
                 ..clear()
-                ..addAll(messages);
+                ..addAll(messages)
+                ..addAll(localMessages);
             });
           },
           onError: (error) {
@@ -3425,6 +3453,67 @@ class _SecretChatScreenState extends State<SecretChatScreen>
     } catch (error) {
       debugPrint('Secret media local save error: $error');
       return null;
+    }
+  }
+
+  String get _localSecretVoiceMessagesKey =>
+      'local_secret_voice_messages_$_secretChatId';
+
+  Future<void> _loadLocalSecretVoiceMessages() async {
+    final preferences = await getSafeSharedPreferences();
+    if (preferences == null) return;
+    try {
+      final encoded = preferences.getString(_localSecretVoiceMessagesKey);
+      if (encoded == null || encoded.isEmpty) return;
+      final storedMessages = jsonDecode(encoded);
+      if (storedMessages is! List) return;
+      for (final item in storedMessages) {
+        if (item is! Map || item['path'] is! String) continue;
+        final path = item['path'] as String;
+        if (!await File(path).exists()) continue;
+        _secretMessages.add({
+          'sender': 'أنت',
+          'text': 'رسالة صوتية 🎙️',
+          'isMe': true,
+          'time': item['time'] as String? ?? _formatMessageTime(),
+          'mediaType': 'audio',
+          'mediaFile': XFile(path),
+          'mediaUrl': 'local://$path',
+        });
+      }
+    } catch (error) {
+      debugPrint('Local secret voice messages load error: $error');
+    }
+  }
+
+  Future<void> _saveLocalSecretVoiceMessage(String path, String time) async {
+    final preferences = await getSafeSharedPreferences();
+    if (preferences == null) return;
+    try {
+      final storedMessages = <Map<String, String>>[];
+      final encoded = preferences.getString(_localSecretVoiceMessagesKey);
+      if (encoded != null && encoded.isNotEmpty) {
+        final decoded = jsonDecode(encoded);
+        if (decoded is List) {
+          for (final item in decoded) {
+            if (item is Map && item['path'] is String) {
+              storedMessages.add({
+                'path': item['path'] as String,
+                'time': item['time'] as String? ?? time,
+              });
+            }
+          }
+        }
+      }
+      if (storedMessages.every((item) => item['path'] != path)) {
+        storedMessages.add({'path': path, 'time': time});
+      }
+      await preferences.setString(
+        _localSecretVoiceMessagesKey,
+        jsonEncode(storedMessages),
+      );
+    } catch (error) {
+      debugPrint('Local secret voice message save error: $error');
     }
   }
 
@@ -3492,11 +3581,12 @@ class _SecretChatScreenState extends State<SecretChatScreen>
 
         final voiceFile = XFile(path);
         final localPath = await _saveSecretMediaLocally(voiceFile, 'audio');
+        final messageTime = _formatMessageTime();
         final secretMsg = {
           'sender': 'أنت',
           'text': 'رسالة صوتية 🎙️',
           'isMe': true,
-          'time': _formatMessageTime(),
+          'time': messageTime,
           'mediaType': 'audio',
           'mediaFile': voiceFile,
           'mediaUrl': localPath,
@@ -3519,6 +3609,9 @@ class _SecretChatScreenState extends State<SecretChatScreen>
           }
         }
 
+        if (remoteUrl == null && localPath != null) {
+          await _saveLocalSecretVoiceMessage(path, messageTime);
+        }
         if (remoteUrl != null) {
           await _saveSecretMediaMessage('رسالة صوتية 🎙️', 'audio', remoteUrl);
         }
@@ -3643,12 +3736,14 @@ class _SecretChatScreenState extends State<SecretChatScreen>
         .collection('messages')
         .doc(docId);
     try {
-      if (forEveryone) {
+      if (forEveryone && message['isMe'] == true) {
         await reference.delete();
+        await _deleteSecretMedia(message, remote: true);
       } else {
         await reference.update({
           'deletedFor': FieldValue.arrayUnion([user.uid]),
         });
+        await _deleteSecretMedia(message, remote: false);
       }
       if (mounted) {
         setState(() {
@@ -3657,6 +3752,28 @@ class _SecretChatScreenState extends State<SecretChatScreen>
       }
     } catch (error) {
       debugPrint('Secret message delete error: $error');
+    }
+  }
+
+  Future<void> _deleteSecretMedia(
+    Map<String, dynamic> message, {
+    required bool remote,
+  }) async {
+    final mediaFile = message['mediaFile'] as XFile?;
+    if (mediaFile != null) {
+      try {
+        final localFile = File(mediaFile.path);
+        if (await localFile.exists()) await localFile.delete();
+      } catch (error) {
+        debugPrint('Secret local media delete error: $error');
+      }
+    }
+    final mediaUrl = message['mediaUrl'] as String?;
+    if (!remote || mediaUrl == null || mediaUrl.isEmpty) return;
+    try {
+      await FirebaseStorage.instance.refFromURL(mediaUrl).delete();
+    } catch (error) {
+      debugPrint('Secret Firebase media delete error: $error');
     }
   }
 
@@ -5740,6 +5857,73 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     return '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
   }
 
+  String get _localVoiceMessagesKey => 'local_voice_messages_$_chatId';
+
+  Future<void> _loadLocalVoiceMessages() async {
+    final preferences = await getSafeSharedPreferences();
+    if (preferences == null) return;
+    try {
+      final encoded = preferences.getString(_localVoiceMessagesKey);
+      if (encoded == null || encoded.isEmpty) return;
+      final storedMessages = jsonDecode(encoded);
+      if (storedMessages is! List) return;
+
+      final restoredMessages = <Message>[];
+      for (final item in storedMessages) {
+        if (item is! Map) continue;
+        final path = item['path'];
+        if (path is! String || !await File(path).exists()) continue;
+        restoredMessages.add(
+          Message(
+            originalText: '🎙️ رسالة صوتية',
+            encryptedData: path,
+            isMe: true,
+            time: item['time'] as String? ?? _messageTime(null),
+            mediaType: 'audio',
+            mediaFile: XFile(path),
+            mediaUrl: 'local://$path',
+          ),
+        );
+      }
+      if (mounted && restoredMessages.isNotEmpty) {
+        setState(() => _messages.addAll(restoredMessages));
+      }
+    } catch (error) {
+      debugPrint('Local voice messages load error: $error');
+    }
+  }
+
+  Future<void> _saveLocalVoiceMessage(String path, String time) async {
+    final preferences = await getSafeSharedPreferences();
+    if (preferences == null) return;
+    try {
+      final storedMessages = <Map<String, String>>[];
+      final encoded = preferences.getString(_localVoiceMessagesKey);
+      if (encoded != null && encoded.isNotEmpty) {
+        final decoded = jsonDecode(encoded);
+        if (decoded is List) {
+          for (final item in decoded) {
+            if (item is Map && item['path'] is String) {
+              storedMessages.add({
+                'path': item['path'] as String,
+                'time': item['time'] as String? ?? time,
+              });
+            }
+          }
+        }
+      }
+      if (storedMessages.every((item) => item['path'] != path)) {
+        storedMessages.add({'path': path, 'time': time});
+      }
+      await preferences.setString(
+        _localVoiceMessagesKey,
+        jsonEncode(storedMessages),
+      );
+    } catch (error) {
+      debugPrint('Local voice message save error: $error');
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -5749,6 +5933,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _chatPassword = chatPasswordsNotifier.value[widget.chatName];
     _chatLocked = _chatPassword != null;
     _loadChatPassword();
+    _loadLocalVoiceMessages();
     _listenToChatMessages();
     if (!_chatLocked && whaleSoundNotifier.value) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -6202,13 +6387,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         setState(() => _isRecording = false);
         if (path != null && path.isNotEmpty) {
           final voiceFile = XFile(path);
-          final mediaUrl = await _uploadMedia(voiceFile, 'audio');
+          final uploadedMediaUrl = await _uploadMedia(voiceFile, 'audio');
+          final mediaUrl = uploadedMediaUrl ?? 'local://$path';
+          final messageTime = _messageTime(null);
+          if (mediaUrl.startsWith('local://')) {
+            await _saveLocalVoiceMessage(path, messageTime);
+          }
           setState(() {
             final Message voiceMessage = Message(
               originalText: '🎙️ رسالة صوتية',
               encryptedData: path,
               isMe: true,
-              time: _messageTime(null),
+              time: messageTime,
               mediaType: 'audio',
               mediaFile: voiceFile,
               mediaUrl: mediaUrl,
@@ -6216,7 +6406,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             _messages.add(voiceMessage);
             _scheduleMessageDeletion(voiceMessage);
           });
-          if (mediaUrl != null) {
+          if (uploadedMediaUrl != null &&
+              !uploadedMediaUrl.startsWith('local://')) {
             await _saveUploadedMediaMessage('🎙️ رسالة صوتية', 'audio', mediaUrl);
           }
         }
@@ -6310,12 +6501,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           );
         });
         
-        // حفظ الرسالة في Firebase
-        await _saveUploadedMediaMessage(
-          video ? '🎬 فيديو' : '🖼️ صورة',
-          mediaType,
-          mediaUrl,
-        );
+        // لا نرسل local:// إلى Firebase؛ هذا المسار صالح على هذا الجهاز فقط.
+        if (!mediaUrl.startsWith('local://')) {
+          await _saveUploadedMediaMessage(
+            video ? '🎬 فيديو' : '🖼️ صورة',
+            mediaType,
+            mediaUrl,
+          );
+        }
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('فشل رفع الملف')),
@@ -6397,7 +6590,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     String mediaType,
     String? mediaUrl,
   ) async {
-    if (!firebaseReady || mediaUrl == null) return;
+    if (!firebaseReady ||
+        mediaUrl == null ||
+        mediaUrl.isEmpty ||
+        mediaUrl.startsWith('local://')) {
+      return;
+    }
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     try {
@@ -6535,13 +6733,42 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     });
   }
 
+  Future<void> _deleteRegularMedia(Message message, {required bool remote}) async {
+    if (message.mediaFile != null) {
+      try {
+        final localFile = File(message.mediaFile!.path);
+        if (await localFile.exists()) await localFile.delete();
+      } catch (error) {
+        debugPrint('Local media delete error: $error');
+      }
+    }
+    if (!remote || message.mediaUrl == null || message.mediaUrl!.isEmpty) {
+      return;
+    }
+    try {
+      await FirebaseStorage.instance.refFromURL(message.mediaUrl!).delete();
+    } catch (error) {
+      debugPrint('Firebase media delete error: $error');
+    }
+  }
+
   Future<void> _deleteRegularMessage(
     Message message, {
     required bool forEveryone,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     final docId = message.firestoreId;
-    if (user == null || docId == null || !firebaseReady) {
+    if (user == null) return;
+    if (forEveryone && !message.isMe) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('يمكن حذف رسائلك لدى الجميع فقط')),
+        );
+      }
+      return;
+    }
+    if (docId == null || !firebaseReady) {
+      await _deleteRegularMedia(message, remote: false);
       if (mounted) setState(() => _messages.remove(message));
       return;
     }
@@ -6554,14 +6781,21 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     try {
       if (forEveryone && message.isMe) {
         await reference.delete();
+        await _deleteRegularMedia(message, remote: true);
       } else {
         await reference.update({
           'deletedFor': FieldValue.arrayUnion([user.uid]),
         });
+        await _deleteRegularMedia(message, remote: false);
       }
       if (mounted) setState(() => _messages.remove(message));
     } catch (error) {
       debugPrint('Regular message delete error: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر حذف الرسالة من Firebase')),
+        );
+      }
     }
   }
 
@@ -6597,6 +6831,28 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       ),
     );
     if (!mounted || deleteMode == null) return;
+    if (deleteMode == 'everyone') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('حذف لدى الجميع'),
+          content: const Text(
+            'سيتم حذف الرسالة والوسائط المرتبطة بها من Firebase لدى جميع المشاركين.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('إلغاء'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('حذف للجميع'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
     await _deleteRegularMessage(
       message,
       forEveryone: deleteMode == 'everyone',
@@ -7519,14 +7775,23 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
   }
 
   Future<void> _pickProfileImage() async {
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
-    if (image != null) {
+    try {
+      final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+      if (image == null) return;
+
       final bytes = await image.readAsBytes();
       userProfileImageNotifier.value = image;
       userProfileImageBytesNotifier.value = bytes;
       await _saveLocalProfileImage(bytes);
       if (mounted) setState(() => _profileImageUrl = null);
       await _uploadProfileImage(image);
+    } catch (error) {
+      debugPrint('Profile image pick error: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر اختيار الصورة الشخصية')),
+        );
+      }
     }
   }
 
@@ -7624,7 +7889,7 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
         setState(() {
           userName = data?['displayName'] as String? ?? userName;
           _profileImageUrl = data?['photoUrl'] as String?;
-          _linkedPhoneNumber = user.phoneNumber ?? data?['phoneNumber'] as String?;
+          _linkedPhoneNumber = user.phoneNumber;
           nameController.text = userName;
         });
 
@@ -7836,7 +8101,7 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
         _isLinkingPhone = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تم ربط رقم الهاتف وحفظه بنجاح')),
+        const SnackBar(content: Text('تم التحقق من الرقم وربطه بحساب Firebase')),
       );
     } on FirebaseAuthException catch (error) {
       debugPrint('Phone credential link failed: ${error.code}');
@@ -7844,6 +8109,13 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
       setState(() => _isLinkingPhone = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(_phoneAuthErrorMessage(error))),
+      );
+    } catch (error) {
+      debugPrint('Unexpected phone credential link error: $error');
+      if (!mounted) return;
+      setState(() => _isLinkingPhone = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تعذر إكمال التحقق من رقم الهاتف')),
       );
     }
   }
@@ -8040,14 +8312,16 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
                                           backgroundColor: isDark
                                               ? Colors.black
                                               : Colors.white,
-                                          backgroundImage: imageBytes != null
+                                            backgroundImage: imageBytes != null
                                               ? MemoryImage(imageBytes)
-                                              : _profileImageUrl != null
+                                              : _profileImageUrl != null &&
+                                                _profileImageUrl!.isNotEmpty
                                               ? NetworkImage(_profileImageUrl!)
                                               : null,
                                           child:
                                               imageBytes == null &&
-                                                  _profileImageUrl == null
+                                                (_profileImageUrl == null ||
+                                                  _profileImageUrl!.isEmpty)
                                               ? Icon(
                                                   Icons.person,
                                                   size: 65,
@@ -8064,18 +8338,17 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
                           ),
                         ),
                         Positioned(
-                          bottom: 2,
-                          left: 2,
-                          child: IgnorePointer(
-                            child: Container(
-                              padding: const EdgeInsets.all(7),
-                              decoration: BoxDecoration(
-                                color: isDark
-                                    ? const Color(0xFF00FF66)
-                                    : Colors.black,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Icon(
+                          bottom: 0,
+                          left: 0,
+                          child: Material(
+                            color: isDark
+                                ? const Color(0xFF00FF66)
+                                : Colors.black,
+                            shape: const CircleBorder(),
+                            child: IconButton(
+                              onPressed: _pickProfileImage,
+                              tooltip: 'تغيير الصورة الشخصية',
+                              icon: Icon(
                                 Icons.camera_alt,
                                 size: 16,
                                 color: isDark ? Colors.black : Colors.white,
@@ -8127,6 +8400,40 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
                     elevation: 2,
                     child: Column(
                       children: [
+                        ListTile(
+                          leading: Icon(
+                            Icons.add_a_photo_rounded,
+                            color: isDark
+                                ? const Color(0xFF00FF66)
+                                : Colors.black,
+                          ),
+                          title: Text(
+                            'تغيير الصورة الشخصية',
+                            style: TextStyle(
+                              color: isDark ? Colors.white : Colors.black,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          subtitle: Text(
+                            'اختيار صورة جديدة من الجهاز',
+                            style: TextStyle(
+                              color: isDark ? Colors.white60 : Colors.black54,
+                              fontSize: 12,
+                            ),
+                          ),
+                          trailing: const Icon(
+                            Icons.arrow_forward_ios_rounded,
+                            size: 16,
+                            color: Colors.grey,
+                          ),
+                          onTap: _pickProfileImage,
+                        ),
+                        Divider(
+                          color: isDark ? Colors.white24 : Colors.grey[300],
+                          height: 1,
+                          indent: 15,
+                          endIndent: 15,
+                        ),
                         ListTile(
                           leading: Icon(
                             Icons.edit_rounded,
