@@ -17,6 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'dart:convert';
 import 'dart:async';
 import 'dart:typed_data';
@@ -72,6 +73,66 @@ const String darkModeKey = 'dark_mode_enabled';
 bool firebaseReady = false;
 String firebaseFailureMessage = '';
 String? currentPublicUserId;
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
+
+Future<void> initializeLocalNotifications() async {
+  if (kIsWeb || defaultTargetPlatform == TargetPlatform.linux) return;
+
+  const AndroidInitializationSettings androidSettings =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+  const DarwinInitializationSettings iosSettings = DarwinInitializationSettings();
+  const InitializationSettings settings = InitializationSettings(
+    android: androidSettings,
+    iOS: iosSettings,
+  );
+
+  await flutterLocalNotificationsPlugin.initialize(settings);
+
+  final androidPlugin =
+      flutterLocalNotificationsPlugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+  await androidPlugin?.requestNotificationsPermission();
+}
+
+Future<void> showChatNotification({
+  required String chatTitle,
+  required String message,
+  bool sentMessage = false,
+}) async {
+  if (kIsWeb || defaultTargetPlatform == TargetPlatform.linux) return;
+
+  final title = sentMessage
+      ? 'A whisper left the dark'
+      : 'Something is waiting';
+  final body = sentMessage
+      ? 'Your message slipped through the silence and reached $chatTitle.'
+      : 'A new pulse just arrived in $chatTitle — $message';
+
+  const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+    'shadow_chat_shadow_signal',
+    'Whisper Echo',
+    channelDescription: 'إشعارات جذابة وغامضة داخل Shadow Chat',
+    importance: Importance.max,
+    priority: Priority.high,
+    playSound: true,
+    enableVibration: true,
+    ticker: 'Whisper Echo',
+  );
+  const DarwinNotificationDetails iosDetails = DarwinNotificationDetails();
+  const NotificationDetails details = NotificationDetails(
+    android: androidDetails,
+    iOS: iosDetails,
+  );
+
+  await flutterLocalNotificationsPlugin.show(
+    DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    title,
+    body,
+    details,
+  );
+}
 
 Future<void> setupPushNotifications() async {
   if (!firebaseReady) return;
@@ -799,6 +860,7 @@ Future<void> initializeFirebase() async {
     }
 
     firebaseReady = true;
+    await initializeLocalNotifications();
     if (FirebaseAuth.instance.currentUser != null) {
       try {
         await ensureUserProfile();
@@ -1676,6 +1738,9 @@ class _ChatListScreenState extends State<ChatListScreen> {
                   child: Image.asset(
                     'assets/images/magic_bg.jpg',
                     fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) => Container(
+                      color: const Color(0xFF101716),
+                    ),
                   ),
                 ),
               ),
@@ -3062,6 +3127,8 @@ class _SecretChatScreenState extends State<SecretChatScreen>
   String? _groupPasswordHash;
   final TextEditingController _passController = TextEditingController();
   final TextEditingController _messageController = TextEditingController();
+  final AudioRecorder _secretVoiceRecorder = AudioRecorder();
+  bool _isSecretRecording = false;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _secretMessagesSubscription;
 
@@ -3346,6 +3413,186 @@ class _SecretChatScreenState extends State<SecretChatScreen>
         );
   }
 
+  Future<String?> _saveSecretMediaLocally(XFile file, String mediaType) async {
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final safeName = file.name.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+      final localFile = File(
+        '${directory.path}/secret_${mediaType}_${DateTime.now().millisecondsSinceEpoch}_$safeName',
+      );
+      await localFile.writeAsBytes(await file.readAsBytes());
+      return 'local://${localFile.path}';
+    } catch (error) {
+      debugPrint('Secret media local save error: $error');
+      return null;
+    }
+  }
+
+  Future<String?> _uploadSecretMedia(XFile file, String mediaType) async {
+    if (!firebaseReady) return null;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return null;
+
+    try {
+      final fileName = 'secret_${mediaType}_${DateTime.now().millisecondsSinceEpoch}_${file.name}';
+      final uploadTask = FirebaseStorage.instance
+          .ref()
+          .child('users')
+          .child(user.uid)
+          .child('secret_media')
+          .child(mediaType)
+          .child(fileName)
+          .putFile(File(file.path));
+      final snapshot = await uploadTask;
+      return await snapshot.ref.getDownloadURL();
+    } catch (error) {
+      debugPrint('Secret media upload error: $error');
+      return null;
+    }
+  }
+
+  Future<void> _saveSecretMediaMessage(
+    String text,
+    String mediaType,
+    String? mediaUrl,
+  ) async {
+    if (!firebaseReady || mediaUrl == null) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    try {
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(_secretChatId)
+          .collection('messages')
+          .add({
+            'sender': 'أنت',
+            'text': text,
+            'uid': user.uid,
+            'deletedFor': <String>[],
+            'mediaType': mediaType,
+            'mediaUrl': mediaUrl,
+            'createdAt': FieldValue.serverTimestamp(),
+            if (autoDeleteMessagesNotifier.value)
+              'expiresAt': Timestamp.fromDate(
+                DateTime.now().add(const Duration(seconds: 8)),
+              ),
+          });
+    } catch (error) {
+      debugPrint('Secret media save error: $error');
+    }
+  }
+
+  Future<void> _toggleSecretVoiceRecording() async {
+    if (_isSecretRecording) {
+      try {
+        final path = await _secretVoiceRecorder.stop();
+        if (!mounted) return;
+        setState(() => _isSecretRecording = false);
+        if (path == null || path.isEmpty) return;
+
+        final voiceFile = XFile(path);
+        final localPath = await _saveSecretMediaLocally(voiceFile, 'audio');
+        final secretMsg = {
+          'sender': 'أنت',
+          'text': 'رسالة صوتية 🎙️',
+          'isMe': true,
+          'time': _formatMessageTime(),
+          'mediaType': 'audio',
+          'mediaFile': voiceFile,
+          'mediaUrl': localPath,
+        };
+
+        if (mounted) {
+          setState(() => _secretMessages.add(secretMsg));
+        }
+
+        String? remoteUrl;
+        if (firebaseReady) {
+          remoteUrl = await _uploadSecretMedia(voiceFile, 'audio');
+          if (remoteUrl != null && mounted) {
+            setState(() {
+              final last = _secretMessages.isNotEmpty ? _secretMessages.last : null;
+              if (last != null) {
+                last['mediaUrl'] = remoteUrl;
+              }
+            });
+          }
+        }
+
+        if (remoteUrl != null) {
+          await _saveSecretMediaMessage('رسالة صوتية 🎙️', 'audio', remoteUrl);
+        }
+      } catch (error) {
+        debugPrint('Secret voice recording stop error: $error');
+        if (mounted) {
+          setState(() => _isSecretRecording = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('خطأ في إيقاف التسجيل: $error')),
+          );
+        }
+      }
+      return;
+    }
+
+    try {
+      final hasPermission = await _secretVoiceRecorder.hasPermission();
+      if (!hasPermission) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('اسمح للتطبيق باستخدام الميكروفون أولًا')),
+        );
+        return;
+      }
+
+      final directory = await getApplicationDocumentsDirectory();
+      final fileName = 'shadow_secret_voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      final filePath = '${directory.path}/$fileName';
+      await _secretVoiceRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          sampleRate: 44100,
+          bitRate: 128000,
+        ),
+        path: filePath,
+      );
+      if (mounted) setState(() => _isSecretRecording = true);
+    } catch (error) {
+      debugPrint('Secret voice recording start error: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ في بدء التسجيل: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _playSecretAudio(Map<String, dynamic> msg) async {
+    final mediaUrl = msg['mediaUrl'] as String?;
+    final mediaFile = msg['mediaFile'] as XFile?;
+    try {
+      final player = AudioPlayer();
+      if (mediaFile != null) {
+        await player.play(DeviceFileSource(mediaFile.path));
+      } else if (mediaUrl != null && mediaUrl.isNotEmpty) {
+        if (mediaUrl.startsWith('local://')) {
+          final localFile = File(mediaUrl.substring('local://'.length));
+          if (await localFile.exists()) {
+            await player.play(DeviceFileSource(localFile.path));
+            return;
+          }
+        }
+        await player.play(UrlSource(mediaUrl));
+      }
+    } catch (error) {
+      debugPrint('Secret audio playback error: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر تشغيل الرسالة الصوتية')),
+        );
+      }
+    }
+  }
+
   Future<void> _saveSecretMessage(String text) async {
     if (!firebaseReady) {
       if (mounted) {
@@ -3561,6 +3808,7 @@ class _SecretChatScreenState extends State<SecretChatScreen>
     _pulseController.dispose();
     _passController.dispose();
     _messageController.dispose();
+    _secretVoiceRecorder.dispose();
     super.dispose();
   }
 
@@ -3878,6 +4126,51 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                     final msg = _secretMessages[index];
                     final bool isMe = msg["isMe"]!;
 
+                    if (msg["mediaType"] == 'audio') {
+                      return Align(
+                        alignment: isMe
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        child: GestureDetector(
+                          onTap: () => _playSecretAudio(msg),
+                          onLongPress: () => _showSecretMessageActions(msg),
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 5),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: isMe
+                                  ? const Color(0xFF176B59)
+                                  : const Color(0xFF202733),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                color: isMe
+                                    ? const Color(0xFF38E8A5).withOpacity(0.7)
+                                    : const Color(0xFF718096).withOpacity(0.45),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.graphic_eq_rounded,
+                                  color: Color(0xFF00FF66),
+                                  size: 24,
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  'رسالة صوتية 🎙️',
+                                  style: TextStyle(
+                                    color: isMe ? Colors.white : Colors.white70,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    }
+
                     bool isWelcomeMsg = msg["text"].toString().contains(
                       "أهلاً بك في المجموعة السرية الآمنة",
                     );
@@ -3964,70 +4257,72 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                              Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    isMe
-                                        ? Icons.account_circle
-                                        : Icons.shield_rounded,
-                                    color: isMe
-                                        ? const Color(0xFF8FFFD0)
-                                        : const Color(0xFFFFD76A),
-                                    size: 15,
-                                  ),
-                                  const SizedBox(width: 5),
-                                  Text(
-                                    msg["sender"]!,
-                                    style: TextStyle(
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      isMe
+                                          ? Icons.account_circle
+                                          : Icons.shield_rounded,
                                       color: isMe
                                           ? const Color(0xFF8FFFD0)
                                           : const Color(0xFFFFD76A),
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
+                                      size: 15,
                                     ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 5),
-                              Text(
-                                msg["text"]!,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 15,
-                                  height: 1.35,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Align(
-                                alignment: AlignmentDirectional.bottomEnd,
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
+                                    const SizedBox(width: 5),
                                     Text(
-                                      msg["time"] ?? _formatMessageTime(),
-                                      style: const TextStyle(
-                                        color: Colors.white54,
-                                        fontSize: 10,
+                                      msg["sender"]!,
+                                      style: TextStyle(
+                                        color: isMe
+                                            ? const Color(0xFF8FFFD0)
+                                            : const Color(0xFFFFD76A),
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
                                       ),
                                     ),
-                                    if (isMe) ...[
-                                      const SizedBox(width: 4),
-                                      const Icon(
-                                        Icons.done_all_rounded,
-                                        size: 14,
-                                        color: Color(0xFFB5E7D2),
-                                      ),
-                                    ],
                                   ],
                                 ),
-                              ),
-                            ],
+                                const SizedBox(height: 5),
+                                Text(
+                                  msg["text"]!,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    height: 1.35,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Align(
+                                  alignment: AlignmentDirectional.bottomEnd,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        msg["time"] ?? _formatMessageTime(),
+                                        style: const TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 10,
+                                        ),
+                                      ),
+                                      if (isMe) ...[
+                                        const SizedBox(width: 4),
+                                        const Icon(
+                                          Icons.done_all_rounded,
+                                          size: 14,
+                                          color: Color(0xFFB5E7D2),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
                     );
                   },
+
                 ),
               ),
 
@@ -4068,6 +4363,18 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                         ),
                         onSubmitted: (_) => _sendSecretMessage(),
                       ),
+                    ),
+                    IconButton(
+                      icon: Icon(
+                        _isSecretRecording
+                            ? Icons.stop_circle_rounded
+                            : Icons.mic_none_rounded,
+                        color: _isSecretRecording
+                            ? Colors.redAccent
+                            : const Color(0xFF38E8A5),
+                      ),
+                      tooltip: _isSecretRecording ? 'إيقاف التسجيل' : 'تسجيل رسالة صوتية',
+                      onPressed: _toggleSecretVoiceRecording,
                     ),
                     IconButton(
                       icon: const Icon(
@@ -5383,13 +5690,7 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
-  final List<Message> _messages = [
-    Message(
-      originalText: 'أهلاً بك في نظام shadow chat ✨ 🌑 ✨',
-      encryptedData: 'أهلاً بك في نظام shadow chat ✨ 🌑 ✨',
-      isMe: false,
-    ),
-  ];
+  final List<Message> _messages = [];
   final TextEditingController _controller = TextEditingController();
   final AudioPlayer _chatAudioPlayer = AudioPlayer();
   final AudioPlayer _messageNotificationPlayer = AudioPlayer();
@@ -5621,7 +5922,25 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                   .toList());
             });
             _hasLoadedMessages = true;
-            if (shouldNotify) unawaited(_playMessageNotification());
+            if (shouldNotify) {
+              unawaited(_playMessageNotification());
+              final incomingText = snapshot.docs
+                  .where(
+                    (doc) =>
+                        doc.data()['uid'] != currentUid &&
+                        doc.data()['text'] != null,
+                  )
+                  .lastOrNull
+                  ?.data()['text'] as String?;
+              if (incomingText != null && incomingText.isNotEmpty) {
+                unawaited(
+                  showChatNotification(
+                    chatTitle: widget.chatName,
+                    message: incomingText,
+                  ),
+                );
+              }
+            }
           },
           onError: (error) {
             debugPrint('Chat messages listener error: $error');
@@ -5670,6 +5989,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             DateTime.now().add(const Duration(seconds: 8)),
           ),
       });
+
+      await showChatNotification(
+        chatTitle: widget.chatName,
+        message: text,
+        sentMessage: true,
+      );
 
       // تحديث lastMessage في جهات الاتصال
       if (widget.contactUid != null) {
@@ -6552,24 +6877,70 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       return GestureDetector(
         onTap: () => _playMediaAudio(message),
         child: Container(
+          width: 220,
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: const Color(0xFF00FF66).withOpacity(0.1),
-            border: Border.all(color: const Color(0xFF00FF66), width: 1),
-            borderRadius: BorderRadius.circular(12),
+            gradient: LinearGradient(
+              colors: message.isMe
+                  ? [const Color(0xFF1FD196), const Color(0xFF0F7D5E)]
+                  : [const Color(0xFF1A2A2D), const Color(0xFF131E21)],
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+            ),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: message.isMe
+                  ? const Color(0xFF9AF7D0).withOpacity(0.8)
+                  : const Color(0xFF7DE5A8).withOpacity(0.5),
+              width: 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF00FF66).withOpacity(0.18),
+                blurRadius: 12,
+                offset: const Offset(0, 3),
+              ),
+            ],
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                Icons.graphic_eq_rounded,
-                color: Color(0xFF00FF66),
-                size: 28,
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.play_arrow_rounded,
+                  color: Colors.white,
+                  size: 24,
+                ),
               ),
-              const SizedBox(width: 8),
-              const Text(
-                'رسالة صوتية 🎙️',
-                style: TextStyle(color: Colors.white),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'رسالة صوتية',
+                      style: TextStyle(
+                        color: message.isMe ? Colors.white : Colors.white70,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'اضغط للتشغيل 🎙️',
+                      style: TextStyle(
+                        color: message.isMe ? Colors.white70 : Colors.white54,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -6690,6 +7061,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                         'assets/images/whale.jpg',
                         fit: BoxFit.cover,
                         cacheWidth: 896,
+                        errorBuilder: (context, error, stackTrace) =>
+                            Container(color: const Color(0xFF101716)),
                       ),
                       builder: (context, child) {
                         return Positioned.fill(
@@ -6783,6 +7156,29 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                           ),
                           const SizedBox(width: 48),
                         ],
+                      ),
+                    ),
+                    Container(
+                      margin: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1B2A25).withOpacity(0.9),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: const Color(0xFF38E8A5).withOpacity(0.35),
+                        ),
+                      ),
+                      child: const Text(
+                        'أهلاً بك في نظام shadow chat ✨ 🌑 ✨',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Color(0xFF00FF66),
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                     Expanded(
@@ -7249,6 +7645,55 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
     }
   }
 
+  void _showProfileImageViewer() {
+    final imageBytes = userProfileImageBytesNotifier.value;
+    final imageUrl = _profileImageUrl;
+
+    showDialog(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (dialogContext) {
+        return Dialog(
+          insetPadding: const EdgeInsets.all(18),
+          backgroundColor: Colors.transparent,
+          child: GestureDetector(
+            onTap: () => Navigator.of(dialogContext).pop(),
+            child: InteractiveViewer(
+              minScale: 1,
+              maxScale: 4,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(22),
+                child: imageBytes != null
+                    ? Image.memory(
+                        imageBytes,
+                        fit: BoxFit.contain,
+                      )
+                    : imageUrl != null && imageUrl.isNotEmpty
+                    ? Image.network(
+                        imageUrl,
+                        fit: BoxFit.contain,
+                      )
+                    : Container(
+                        width: 220,
+                        height: 220,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF101716),
+                          borderRadius: BorderRadius.circular(22),
+                        ),
+                        child: const Icon(
+                          Icons.person,
+                          size: 110,
+                          color: Color(0xFF00FF66),
+                        ),
+                      ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _linkPhoneNumber() async {
     final user = FirebaseAuth.instance.currentUser;
     if (!firebaseReady || user == null) {
@@ -7569,7 +8014,15 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
                           shape: const CircleBorder(),
                           clipBehavior: Clip.hardEdge,
                           child: InkWell(
-                            onTap: _pickProfileImage,
+                            onTap: () {
+                              if (userProfileImageBytesNotifier.value != null ||
+                                  (_profileImageUrl != null &&
+                                      _profileImageUrl!.isNotEmpty)) {
+                                _showProfileImageViewer();
+                              } else {
+                                _pickProfileImage();
+                              }
+                            },
                             child: ValueListenableBuilder<XFile?>(
                               valueListenable: userProfileImageNotifier,
                               builder: (context, profileImg, child) {
