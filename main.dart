@@ -70,6 +70,8 @@ final ValueNotifier<Uint8List?> userProfileImageBytesNotifier =
 const String appLockEnabledKey = 'app_lock_enabled';
 const String appLockPasswordHashKey = 'app_lock_password_hash';
 const String darkModeKey = 'dark_mode_enabled';
+const String updateNoticeVersionKey = 'update_notice_version';
+const String updateNoticeCountKey = 'update_notice_count';
 bool firebaseReady = false;
 String firebaseFailureMessage = '';
 String? currentPublicUserId;
@@ -185,10 +187,20 @@ Future<void> checkForUpdates(BuildContext context) async {
     final isForced = updateDoc.data()?['forced'] as bool? ?? false;
     
     if (latestVersion == null || latestVersion == currentVersion) return;
+
+    final preferences = await getSafeSharedPreferences();
+    if (preferences == null) return;
+    final savedVersion = preferences.getString(updateNoticeVersionKey);
+    final shownCount = savedVersion == latestVersion
+      ? preferences.getInt(updateNoticeCountKey) ?? 0
+      : 0;
+    if (shownCount >= 2) return;
     
     // مقارنة الإصدارات
     if (_isNewVersionAvailable(currentVersion, latestVersion)) {
       if (context.mounted) {
+        await preferences.setString(updateNoticeVersionKey, latestVersion);
+        await preferences.setInt(updateNoticeCountKey, shownCount + 1);
         _showUpdateDialog(
           context,
           latestVersion,
