@@ -8022,12 +8022,22 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
     );
     phoneController.dispose();
     if (!mounted || phoneNumber == null || phoneNumber.isEmpty) return;
+    final normalizedPhoneNumber = _normalizePhoneNumber(phoneNumber);
+    if (!normalizedPhoneNumber.startsWith('+') ||
+        normalizedPhoneNumber.length < 10) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('اكتب رقم الهاتف بالصيغة الدولية مثل +201xxxxxxxxx'),
+        ),
+      );
+      return;
+    }
 
     setState(() => _isLinkingPhone = true);
     String? verificationId;
     try {
       await FirebaseAuth.instance.verifyPhoneNumber(
-        phoneNumber: phoneNumber,
+        phoneNumber: normalizedPhoneNumber,
         // لا نربط الرقم تلقائيًا حتى لا يظهر نجاح بدون إدخال كود SMS.
         verificationCompleted: (_) {
           debugPrint('Automatic phone verification ignored; waiting for SMS code.');
@@ -8042,6 +8052,11 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
         },
         codeSent: (id, _) async {
           verificationId = id;
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('تم إرسال كود SMS فعليًا')),
+            );
+          }
           if (!mounted) return;
           final codeController = TextEditingController();
           final code = await showDialog<String>(
