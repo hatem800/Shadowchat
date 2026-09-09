@@ -3740,7 +3740,22 @@ class _SecretChatScreenState extends State<SecretChatScreen>
   }) async {
     final docId = message['docId'];
     final user = FirebaseAuth.instance.currentUser;
-    if (!firebaseReady || docId is! String || user == null) return;
+    if (user == null) return;
+    if (docId is! String || !firebaseReady) {
+      await _deleteSecretMedia(message, remote: false);
+      if (mounted) {
+        setState(() => _secretMessages.remove(message));
+      }
+      return;
+    }
+    if (forEveryone && message['isMe'] != true) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('يمكن حذف رسائلك لدى الجميع فقط')),
+        );
+      }
+      return;
+    }
 
     final reference = FirebaseFirestore.instance
         .collection('chats')
@@ -3764,6 +3779,11 @@ class _SecretChatScreenState extends State<SecretChatScreen>
       }
     } catch (error) {
       debugPrint('Secret message delete error: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر حذف الرسالة من Firebase')),
+        );
+      }
     }
   }
 
@@ -3790,7 +3810,6 @@ class _SecretChatScreenState extends State<SecretChatScreen>
   }
 
   Future<void> _showSecretMessageActions(Map<String, dynamic> message) async {
-    if (message['docId'] is! String) return;
     final deleteMode = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: const Color(0xFF18231F),
@@ -3805,7 +3824,7 @@ class _SecretChatScreenState extends State<SecretChatScreen>
               ),
               onTap: () => Navigator.pop(sheetContext, 'mine'),
             ),
-            if (message['isMe'] == true)
+            if (message['isMe'] == true && message['docId'] is String)
               ListTile(
                 leading: const Icon(
                   Icons.delete_forever,
@@ -3822,6 +3841,28 @@ class _SecretChatScreenState extends State<SecretChatScreen>
       ),
     );
     if (!mounted || deleteMode == null) return;
+    if (deleteMode == 'everyone' && message['docId'] is String) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('حذف لدى الجميع'),
+          content: const Text(
+            'سيتم حذف الرسالة والوسائط المرتبطة بها من Firebase لدى جميع المشاركين.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('إلغاء'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('حذف للجميع'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
     await _deleteSecretMessage(
       message,
       forEveryone: deleteMode == 'everyone',
@@ -6826,7 +6867,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               ),
               onTap: () => Navigator.pop(sheetContext, 'mine'),
             ),
-            if (message.isMe)
+            if (message.isMe && message.firestoreId != null)
               ListTile(
                 leading: const Icon(
                   Icons.delete_forever,
