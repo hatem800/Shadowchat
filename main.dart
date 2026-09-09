@@ -923,6 +923,8 @@ Future<void> ensureUserProfile() async {
     'displayName': profile.data()?['displayName'] ?? 'Shadow User',
     if (user.phoneNumber != null)
       'phoneNumber': _normalizePhoneNumber(user.phoneNumber!),
+    if (user.phoneNumber != null)
+      'phoneSearchKey': _phoneSearchKey(user.phoneNumber!),
     'updatedAt': FieldValue.serverTimestamp(),
   }, SetOptions(merge: true));
 
@@ -946,6 +948,15 @@ Future<void> ensureUserProfile() async {
 
 String _normalizePhoneNumber(String phone) =>
     phone.replaceAll(RegExp(r'[^0-9+]'), '');
+
+String _phoneSearchKey(String phone) {
+  final normalized = _normalizePhoneNumber(phone).replaceFirst(
+    RegExp(r'^\+'),
+  );
+  return normalized.length > 10
+      ? normalized.substring(normalized.length - 10)
+      : normalized;
+}
 
 Future<void> updatePresence(bool isOnline) async {
   if (!firebaseReady) return;
@@ -2176,7 +2187,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
           .collection('users')
           .where('publicId', isEqualTo: publicId)
           .limit(1)
-          .get();
+          .get()
+          .timeout(const Duration(seconds: 12));
       if (matchingUsers.docs.isEmpty) {
         if (mounted)
           ScaffoldMessenger.of(context).showSnackBar(
@@ -2264,10 +2276,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   }
 
   String _phoneMatchKey(String phone) {
-    final normalized = _normalizePhone(phone).replaceFirst(RegExp(r'^\+'), '');
-    return normalized.length > 10
-        ? normalized.substring(normalized.length - 10)
-        : normalized;
+    return _phoneSearchKey(phone);
   }
 
   Future<void> _addPhoneContact(Contact contact) async {
@@ -2278,9 +2287,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (!firebaseReady || user == null || phone.isEmpty) return;
     try {
       final phoneKey = _phoneMatchKey(phone);
-      final usersSnapshot = await FirebaseFirestore.instance
+        final usersSnapshot = await FirebaseFirestore.instance
           .collection('users')
-          .get();
+          .where('phoneSearchKey', isEqualTo: phoneKey)
+          .limit(1)
+          .get()
+          .timeout(const Duration(seconds: 12));
       QueryDocumentSnapshot<Map<String, dynamic>>? matchingUser;
       for (final candidate in usersSnapshot.docs) {
         final storedPhone = candidate.data()['phoneNumber'];
@@ -7935,14 +7947,15 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
     User? user = initialUser;
     if (!firebaseReady || user == null) return;
     try {
-      await user.reload();
+      await user.reload().timeout(const Duration(seconds: 10));
       final refreshedUser = FirebaseAuth.instance.currentUser;
       if (refreshedUser == null) return;
       final data =
           (await FirebaseFirestore.instance
                   .collection('users')
                   .doc(refreshedUser.uid)
-                  .get())
+                  .get()
+                  .timeout(const Duration(seconds: 10)))
               .data();
       if (mounted) {
         setState(() {
@@ -7955,7 +7968,9 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
         // تحميل الصورة من الرابط إذا كانت موجودة
         if (_profileImageUrl != null && _profileImageUrl!.isNotEmpty) {
           try {
-            final response = await http.get(Uri.parse(_profileImageUrl!));
+            final response = await http
+              .get(Uri.parse(_profileImageUrl!))
+              .timeout(const Duration(seconds: 8));
             if (response.statusCode == 200) {
               userProfileImageBytesNotifier.value = response.bodyBytes;
             }
@@ -8145,7 +8160,7 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
           await _finishPhoneLink(credential);
         },
         codeAutoRetrievalTimeout: (id) => verificationId = id,
-      );
+      ).timeout(const Duration(seconds: 25));
     } catch (error) {
       debugPrint('Phone linking error: $error');
       if (mounted) {
@@ -8167,6 +8182,7 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
       }
       await FirebaseFirestore.instance.collection('users').doc(linkedUser.uid).set({
         'phoneNumber': _normalizePhoneNumber(linkedUser.phoneNumber!),
+        'phoneSearchKey': _phoneSearchKey(linkedUser.phoneNumber!),
         'phoneLinked': true,
         'phoneUpdatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
