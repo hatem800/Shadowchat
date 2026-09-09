@@ -2364,7 +2364,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                             fontSize: 13,
                             fontWeight: FontWeight.bold,
                           ),
-                      ),
+                        );
                       },
                     ),
                   const SizedBox(height: 8),
