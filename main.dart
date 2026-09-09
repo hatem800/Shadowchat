@@ -7965,19 +7965,6 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
           nameController.text = userName;
         });
 
-        // تحميل الصورة من الرابط إذا كانت موجودة
-        if (_profileImageUrl != null && _profileImageUrl!.isNotEmpty) {
-          try {
-            final response = await http
-              .get(Uri.parse(_profileImageUrl!))
-              .timeout(const Duration(seconds: 8));
-            if (response.statusCode == 200) {
-              userProfileImageBytesNotifier.value = response.bodyBytes;
-            }
-          } catch (imageError) {
-            debugPrint('Profile image load error: $imageError');
-          }
-        }
       }
     } catch (error) {
       debugPrint('Profile load error: $error');
@@ -8011,6 +7998,11 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
                     ? Image.network(
                         imageUrl,
                         fit: BoxFit.contain,
+                        errorBuilder: (context, error, stackTrace) => const Icon(
+                          Icons.person,
+                          size: 110,
+                          color: Color(0xFF00FF66),
+                        ),
                       )
                     : Container(
                         width: 220,
@@ -8403,24 +8395,54 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
                                           backgroundColor: isDark
                                               ? Colors.black
                                               : Colors.white,
-                                            backgroundImage: imageBytes != null
-                                              ? MemoryImage(imageBytes)
+                                          child: imageBytes != null
+                                              ? ClipOval(
+                                                  child: Image.memory(
+                                                    imageBytes,
+                                                    width: 112,
+                                                    height: 112,
+                                                    fit: BoxFit.cover,
+                                                    errorBuilder: (
+                                                      context,
+                                                      error,
+                                                      stackTrace,
+                                                    ) => Icon(
+                                                      Icons.person,
+                                                      size: 65,
+                                                      color: isDark
+                                                          ? const Color(0xFF00FF66)
+                                                          : Colors.black54,
+                                                    ),
+                                                  ),
+                                                )
                                               : _profileImageUrl != null &&
-                                                _profileImageUrl!.isNotEmpty
-                                              ? NetworkImage(_profileImageUrl!)
-                                              : null,
-                                          child:
-                                              imageBytes == null &&
-                                                (_profileImageUrl == null ||
-                                                  _profileImageUrl!.isEmpty)
-                                              ? Icon(
+                                                    _profileImageUrl!.isNotEmpty
+                                              ? ClipOval(
+                                                  child: Image.network(
+                                                    _profileImageUrl!,
+                                                    width: 112,
+                                                    height: 112,
+                                                    fit: BoxFit.cover,
+                                                    errorBuilder: (
+                                                      context,
+                                                      error,
+                                                      stackTrace,
+                                                    ) => Icon(
+                                                      Icons.person,
+                                                      size: 65,
+                                                      color: isDark
+                                                          ? const Color(0xFF00FF66)
+                                                          : Colors.black54,
+                                                    ),
+                                                  ),
+                                                )
+                                              : Icon(
                                                   Icons.person,
                                                   size: 65,
                                                   color: isDark
                                                       ? const Color(0xFF00FF66)
                                                       : Colors.black54,
-                                                )
-                                              : null,
+                                                ),
                                         ),
                                       ),
                                 );
