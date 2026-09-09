@@ -1096,9 +1096,9 @@ class _AuthGateState extends State<AuthGate> {
 
     try {
       await FirebaseAuth.instance.signInAnonymously();
-        await ensureUserProfile();
-        await loadRoomOwnerKey();
-        await loadSecretRoomCode();
+      await ensureUserProfile();
+      await loadRoomOwnerKey();
+      await loadSecretRoomCode();
       await setupPushNotifications();
       if (mounted) setState(() => _authError = null);
     } catch (error) {
@@ -4288,6 +4288,44 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                   ],
                 ),
               ),
+              Container(
+                margin: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.amberAccent.withOpacity(0.06),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                    color: Colors.amberAccent.withOpacity(0.25),
+                  ),
+                ),
+                child: Column(
+                  children: [
+                    const Icon(
+                      Icons.verified_user_rounded,
+                      color: Colors.amberAccent,
+                      size: 30,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      widget.chatTitle.contains('الغرفة السوداء')
+                          ? 'أهلاً بك في غرفة Shadow Ops'
+                          : 'أهلاً بك في المجموعة السرية الآمنة',
+                      style: const TextStyle(
+                        color: Colors.amberAccent,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'جميع الرسائل هنا مشفرة ومؤمنة بالكامل.',
+                      style: TextStyle(color: Colors.grey, fontSize: 11),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
               Expanded(
                 child: ListView.builder(
                   primary: false,
@@ -4342,51 +4380,14 @@ class _SecretChatScreenState extends State<SecretChatScreen>
                       );
                     }
 
-                    bool isWelcomeMsg = msg["text"].toString().contains(
-                      "أهلاً بك في المجموعة السرية الآمنة",
-                    );
-
-                    if (isWelcomeMsg && !isMe) {
-                      return Container(
-                        margin: const EdgeInsets.only(top: 10, bottom: 20),
-                        padding: const EdgeInsets.all(20),
-                        decoration: BoxDecoration(
-                          color: Colors.amberAccent.withOpacity(0.06),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: Colors.amberAccent.withOpacity(0.25),
-                          ),
-                        ),
-                        child: Column(
-                          children: [
-                            const Icon(
-                              Icons.verified_user_rounded,
-                              color: Colors.amberAccent,
-                              size: 38,
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              msg["text"]!,
-                              style: const TextStyle(
-                                color: Colors.amberAccent,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                            const SizedBox(height: 6),
-                            const Text(
-                              "جميع الرسائل داخل هذه الغرفة مشفرة ومؤمنة بالكامل.",
-                              style: TextStyle(
-                                color: Colors.grey,
-                                fontSize: 12,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
-                        ),
-                      );
-                    }
+                    final isWelcomeMsg = !isMe &&
+                        (msg["text"].toString().contains(
+                              "أهلاً بك في المجموعة السرية الآمنة",
+                            ) ||
+                            msg["text"].toString().contains(
+                              "أهلاً بك في غرفة Shadow Ops",
+                            ));
+                    if (isWelcomeMsg) return const SizedBox.shrink();
 
                     return Align(
                       alignment: isMe
