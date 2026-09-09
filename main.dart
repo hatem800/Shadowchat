@@ -7931,23 +7931,24 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
 
   Future<void> _loadProfile() async {
     await _loadLocalProfileImage();
-    var user = FirebaseAuth.instance.currentUser;
+    final initialUser = FirebaseAuth.instance.currentUser;
+    User? user = initialUser;
     if (!firebaseReady || user == null) return;
     try {
       await user.reload();
-      user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
+      final refreshedUser = FirebaseAuth.instance.currentUser;
+      if (refreshedUser == null) return;
       final data =
           (await FirebaseFirestore.instance
                   .collection('users')
-                  .doc(user.uid)
+                  .doc(refreshedUser.uid)
                   .get())
               .data();
       if (mounted) {
         setState(() {
           userName = data?['displayName'] as String? ?? userName;
           _profileImageUrl = data?['photoUrl'] as String?;
-          _linkedPhoneNumber = user.phoneNumber;
+          _linkedPhoneNumber = refreshedUser.phoneNumber;
           nameController.text = userName;
         });
 
