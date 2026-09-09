@@ -7888,9 +7888,12 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
 
   Future<void> _loadProfile() async {
     await _loadLocalProfileImage();
-    final user = FirebaseAuth.instance.currentUser;
+    var user = FirebaseAuth.instance.currentUser;
     if (!firebaseReady || user == null) return;
     try {
+      await user.reload();
+      user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
       final data =
           (await FirebaseFirestore.instance
                   .collection('users')
@@ -8025,8 +8028,9 @@ class _AccountAndThemeScreenState extends State<AccountAndThemeScreen> {
     try {
       await FirebaseAuth.instance.verifyPhoneNumber(
         phoneNumber: phoneNumber,
-        verificationCompleted: (credential) async {
-          await _finishPhoneLink(credential);
+        // لا نربط الرقم تلقائيًا حتى لا يظهر نجاح بدون إدخال كود SMS.
+        verificationCompleted: (_) {
+          debugPrint('Automatic phone verification ignored; waiting for SMS code.');
         },
         verificationFailed: (error) {
           if (mounted) {
