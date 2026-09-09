@@ -4290,6 +4290,7 @@ class _SecretChatScreenState extends State<SecretChatScreen>
               ),
               Expanded(
                 child: ListView.builder(
+                  primary: false,
                   padding: const EdgeInsets.fromLTRB(14, 8, 14, 16),
                   itemCount: _secretMessages.length,
                   itemBuilder: (context, index) {
